@@ -36,6 +36,14 @@ LIGHT_SUPPORT_COLOR_TEMP = 2
 LIGHT_SUPPORT_RGB_COLOR = 16
 LIGHT_SUPPORT_XY_COLOR = 64
 
+TYPE_CAMERA = 'CAMERA'
+TYPE_LIGHT = 'LIGHT'
+TYPE_SMARTLOCK = 'SMARTLOCK'
+TYPE_SMARTPLUG = 'SMARTPLUG'
+TYPE_SWITCH = 'SWITCH'
+TYPE_THERMOSTAT = 'THERMOSTAT'
+TYPE_ACTIVITY_TRIGGER = 'ACTIVITY_TRIGGER'
+TYPE_SCENE_TRIGGER = 'SCENE_TRIGGER'
 
 class HomeAssistant(object):
     def __init__(self, config):
@@ -83,7 +91,7 @@ class ConnectedHomeCall(object):
             self.entity = mk_entity(ha, details['entity_id'])
 
     class ConnectedHomeException(Exception):
-        def __init__(self, name="DriverInternalError", payload={}):
+        def __init__(self, name='DriverInternalError', payload={}):
             self.error_name = name
             self.payload = payload
 
@@ -249,8 +257,8 @@ class Alexa(object):
                 return self.handle_temperature_adj(operator.sub)
 
             def SetLockStateRequest(self):
-                self.entity.set_lock_state(self.payload["lockState"])
-                return {'lockState': self.payload["lockState"]}
+                self.entity.set_lock_state(self.payload['lockState'])
+                return {'lockState': self.payload['lockState']}
 
             def SetColorRequest(self):
                 self.entity.set_color(self.payload['color']['hue'],
@@ -281,6 +289,10 @@ class Alexa(object):
                 lock_state = self.entity.get_lock_state().upper()
                 return {'lockState': lock_state}
 
+            def RetrieveCameraStreamUriRequest(self):
+                (camera_uri, image_uri) = self.entity.retrieve_camera_stream_uri()
+                return {'uri': camera_uri, 'imageUri': image_uri}
+
 
 def invoke(namespace, name, ha, context):
     class allowed(object):
@@ -306,6 +318,22 @@ def discover_appliances(ha):
         else:
             return ha.config.expose_by_default
 
+    def get_friendly_name(x):
+        if 'haaska_name' in x['attributes']:
+            friendly_name = x['attributes']['haaska_name']
+        else:
+            friendly_name = x['attributes']['friendly_name']
+            suffix = ha.config.entity_suffixes[entity_domain(x)]
+            if suffix != '':
+                friendly_name += ' ' + suffix
+        return friendly_name
+
+    def get_friendly_description(x):
+        if 'haaska_desc' in x['attributes']:
+            return x['attributes']['haaska_desc']
+        else:
+            return 'Home Assistant ' + entity_domain(x).replace('_', ' ').title()
+
     def mk_appliance(x):
         features = 0
         if 'supported_features' in x['attributes']:
@@ -314,21 +342,12 @@ def discover_appliances(ha):
         o = {}
         # this needs to be unique and has limitations on allowed characters:
         o['applianceId'] = sha1(x['entity_id'].encode('utf-8')).hexdigest()
+        o['applianceTypes'] = entity.get_types()
         o['manufacturerName'] = 'Unknown'
         o['modelName'] = 'Unknown'
         o['version'] = 'Unknown'
-        if 'haaska_name' in x['attributes']:
-            o['friendlyName'] = x['attributes']['haaska_name']
-        else:
-            o['friendlyName'] = x['attributes']['friendly_name']
-            suffix = ha.config.entity_suffixes[entity_domain(x)]
-            if suffix != '':
-                o['friendlyName'] += ' ' + suffix
-        if 'haaska_desc' in x['attributes']:
-            o['friendlyDescription'] = x['attributes']['haaska_desc']
-        else:
-            o['friendlyDescription'] = 'Home Assistant ' + \
-                entity_domain(x).replace('_', ' ').title()
+        o['friendlyName'] = get_friendly_name(x)
+        o['friendlyDescription'] = get_friendly_description(x)
         o['isReachable'] = True
         o['actions'] = entity.get_actions()
         o['additionalApplianceDetails'] = {'entity_id': x['entity_id'],
@@ -396,7 +415,7 @@ class Entity(object):
         if hasattr(self, 'set_lock_state'):
             actions.append('setLockState')
 
-        if self.entity_domain == "light":
+        if self.entity_domain == 'light':
             if self.supported_features & LIGHT_SUPPORT_RGB_COLOR:
                 actions.append('setColor')
             if self.supported_features & LIGHT_SUPPORT_COLOR_TEMP:
@@ -405,6 +424,24 @@ class Entity(object):
                 actions.append('decrementColorTemperature')
 
         return actions
+
+    def get_types(self):
+        types = []
+
+        if self.entity_domain == 'camera':
+            types.append(TYPE_CAMERA)
+        if self.entity_domain == 'climate':
+            types.append(TYPE_THERMOSTAT)
+        if self.entity_domain == 'light':
+            types.append(TYPE_LIGHT)
+        if self.entity_domain == 'lock':
+            types.append(TYPE_SMARTLOCK)
+        if self.entity_domain == 'scene':
+            types.append(TYPE_SCENE_TRIGGER)
+        if self.entity_domain in 'switch':
+            types.append(TYPE_SWITCH)
+
+        return types
 
 
 class ToggleEntity(Entity):
@@ -415,101 +452,20 @@ class ToggleEntity(Entity):
         self._call_service('homeassistant/turn_off')
 
 
-class InputSliderEntity(Entity):
-    def get_percentage(self):
-        state = self.ha.get('states/' + self.entity_id)
-        value = float(state['state'])
-        minimum = state['attributes']['min']
-        maximum = state['attributes']['max']
-        adjusted = value - minimum
+class CameraEntity(Entity):
+    def retrieve_camera_stream_uri(self):
+        camera = self.ha.get('states/' + self.entity_id)
+        access_token = camera['attributes']['access_token']
+        logger.debug('camera access token: %s', access_token)
 
-        return (adjusted * 100.0 / (maximum - minimum))
+        camera_uri = self.ha.build_url(
+            'camera_proxy_stream/%s?token=%s' % (self.entity_id, access_token))
+        logger.debug('camera_uri: %s', camera_uri)
+        image_uri = self.ha.build_url(
+            'camera_proxy/%s?token=%s' % (self.entity_id, access_token))
+        logger.debug('image_uri:', image_uri)
 
-    def set_percentage(self, val):
-        state = self.ha.get('states/' + self.entity_id)
-        minimum = state['attributes']['min']
-        maximum = state['attributes']['max']
-        step = state['attributes']['step']
-        scaled = val * (maximum - minimum) / 100.0
-        rounded = step * round(scaled / step)
-        adjusted = rounded + minimum
-
-        self._call_service('input_slider/select_value', {'value': adjusted})
-
-
-class GarageDoorEntity(ToggleEntity):
-    def turn_on(self):
-        self._call_service('garage_door/open')
-
-    def turn_off(self):
-        self._call_service('garage_door/close')
-
-
-class CoverEntity(ToggleEntity):
-    def turn_on(self):
-        self._call_service('cover/open_cover')
-
-    def turn_off(self):
-        self._call_service('cover/close_cover')
-
-
-class LockEntity(Entity):
-    def set_lock_state(self, state):
-        if state == "LOCKED":
-            self._call_service('lock/lock')
-        elif state == "UNLOCKED":
-            self._call_service('lock/unlock')
-
-    def get_lock_state(self):
-        state = self.ha.get('states/' + self.entity_id)
-        return state['state']
-
-
-class ScriptEntity(ToggleEntity):
-    def turn_off(self):
-        self.turn_on()
-
-
-class SceneEntity(ToggleEntity):
-    def turn_off(self):
-        self.turn_on()
-
-
-class LightEntity(ToggleEntity):
-    def get_percentage(self):
-        state = self.ha.get('states/' + self.entity_id)
-        current_brightness = state['attributes']['brightness']
-        return (current_brightness / 255.0) * 100.0
-
-    def set_percentage(self, val):
-        brightness = (val / 100.0) * 255.0
-        self._call_service('light/turn_on', {'brightness': brightness})
-
-    def get_color_temperature(self):
-        state = self.ha.get('states/' + self.entity_id)
-        current_temperature = state['attributes']['color_temp']
-        return (1000000 / current_temperature)
-
-    def set_color(self, hue, saturation, brightness):
-        rgb = [int(round(i * 255)) for i in colorsys.hsv_to_rgb(hue / 360.0,
-                                                                saturation,
-                                                                brightness)]
-        self._call_service('light/turn_on', {'rgb_color': rgb})
-
-    def set_color_temperature(self, val):
-        self._call_service('light/turn_on',
-                           {'color_temp': (1000000 / val)})
-
-
-class MediaPlayerEntity(ToggleEntity):
-    def get_percentage(self):
-        state = self.ha.get('states/' + self.entity_id)
-        vol = state['attributes']['volume_level']
-        return vol * 100.0
-
-    def set_percentage(self, val):
-        vol = val / 100.0
-        self._call_service('media_player/volume_set', {'volume_level': vol})
+        return (camera_uri, image_uri)
 
 
 class ClimateEntity(Entity):
@@ -556,46 +512,144 @@ class ClimateEntity(Entity):
         self._call_service('climate/set_temperature', data)
 
 
+class CoverEntity(ToggleEntity):
+    def turn_on(self):
+        self._call_service('cover/open_cover')
+
+    def turn_off(self):
+        self._call_service('cover/close_cover')
+
+
 class FanEntity(ToggleEntity):
     def get_percentage(self):
         state = self.ha.get('states/' + self.entity_id)
         speed = state['attributes']['speed']
-        if speed == "off":
+        if speed == 'off':
             return 0
-        elif speed == "low":
+        elif speed == 'low':
             return 33
-        elif speed == "medium":
+        elif speed == 'medium':
             return 66
-        elif speed == "high":
+        elif speed == 'high':
             return 100
 
     def set_percentage(self, val):
-        speed = "off"
+        speed = 'off'
         if val <= 33:
-            speed = "low"
+            speed = 'low'
         elif val <= 66:
-            speed = "medium"
+            speed = 'medium'
         elif val <= 100:
-            speed = "high"
+            speed = 'high'
         self._call_service('fan/set_speed', {'speed': speed})
 
 
+class GarageDoorEntity(ToggleEntity):
+    def turn_on(self):
+        self._call_service('garage_door/open')
+
+    def turn_off(self):
+        self._call_service('garage_door/close')
+
+
+class InputSliderEntity(Entity):
+    def get_percentage(self):
+        state = self.ha.get('states/' + self.entity_id)
+        value = float(state['state'])
+        minimum = state['attributes']['min']
+        maximum = state['attributes']['max']
+        adjusted = value - minimum
+
+        return (adjusted * 100.0 / (maximum - minimum))
+
+    def set_percentage(self, val):
+        state = self.ha.get('states/' + self.entity_id)
+        minimum = state['attributes']['min']
+        maximum = state['attributes']['max']
+        step = state['attributes']['step']
+        scaled = val * (maximum - minimum) / 100.0
+        rounded = step * round(scaled / step)
+        adjusted = rounded + minimum
+
+        self._call_service('input_slider/select_value', {'value': adjusted})
+
+
+class LightEntity(ToggleEntity):
+    def get_percentage(self):
+        state = self.ha.get('states/' + self.entity_id)
+        current_brightness = state['attributes']['brightness']
+        return (current_brightness / 255.0) * 100.0
+
+    def set_percentage(self, val):
+        brightness = (val / 100.0) * 255.0
+        self._call_service('light/turn_on', {'brightness': brightness})
+
+    def get_color_temperature(self):
+        state = self.ha.get('states/' + self.entity_id)
+        current_temperature = state['attributes']['color_temp']
+        return (1000000 / current_temperature)
+
+    def set_color(self, hue, saturation, brightness):
+        rgb = [int(round(i * 255)) for i in colorsys.hsv_to_rgb(hue / 360.0,
+                                                                saturation,
+                                                                brightness)]
+        self._call_service('light/turn_on', {'rgb_color': rgb})
+
+    def set_color_temperature(self, val):
+        self._call_service('light/turn_on',
+                           {'color_temp': (1000000 / val)})
+
+
+class LockEntity(Entity):
+    def set_lock_state(self, state):
+        if state == 'LOCKED':
+            self._call_service('lock/lock')
+        elif state == 'UNLOCKED':
+            self._call_service('lock/unlock')
+
+    def get_lock_state(self):
+        state = self.ha.get('states/' + self.entity_id)
+        return state['state']
+
+
+class MediaPlayerEntity(ToggleEntity):
+    def get_percentage(self):
+        state = self.ha.get('states/' + self.entity_id)
+        vol = state['attributes']['volume_level']
+        return vol * 100.0
+
+    def set_percentage(self, val):
+        vol = val / 100.0
+        self._call_service('media_player/volume_set', {'volume_level': vol})
+
+
+class SceneEntity(ToggleEntity):
+    def turn_off(self):
+        self.turn_on()
+
+
+class ScriptEntity(ToggleEntity):
+    def turn_off(self):
+        self.turn_on()
+
+
 DOMAINS = {
+    'alert': ToggleEntity,
+    'automation': ToggleEntity,
+    'camera': CameraEntity,
+    'climate': ClimateEntity,
+    'cover': CoverEntity,
+    'fan': FanEntity,
     'garage_door': GarageDoorEntity,
     'group': ToggleEntity,
     'input_boolean': ToggleEntity,
     'input_slider': InputSliderEntity,
-    'switch': ToggleEntity,
-    'fan': FanEntity,
-    'cover': CoverEntity,
-    'lock': LockEntity,
-    'script': ScriptEntity,
-    'scene': SceneEntity,
     'light': LightEntity,
+    'lock': LockEntity,
     'media_player': MediaPlayerEntity,
-    'climate': ClimateEntity,
-    'alert': ToggleEntity,
-    'automation': ToggleEntity
+    'scene': SceneEntity,
+    'script': ScriptEntity,
+    'switch': ToggleEntity
 }
 
 
