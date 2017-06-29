@@ -55,7 +55,7 @@ class HomeAssistant(object):
         self.session.verify = config.ssl_verify
 
     def build_url(self, relurl):
-        return '%s/%s' % (self.config.url, relurl)
+        return '{}/{}'.format(self.config.url, relurl)
 
     def get(self, relurl):
         r = self.session.get(self.build_url(relurl))
@@ -291,7 +291,14 @@ class Alexa(object):
 
             def RetrieveCameraStreamUriRequest(self):
                 (camera_uri, image_uri) = self.entity.retrieve_camera_stream_uri()
-                return {'uri': camera_uri, 'imageUri': image_uri}
+                return {
+                    'uri': {
+                        'value': camera_uri
+                    },
+                    'imageUri': {
+                        'value': image_uri
+                    }
+                }
 
 
 def invoke(namespace, name, ha, context):
@@ -415,6 +422,9 @@ class Entity(object):
         if hasattr(self, 'set_lock_state'):
             actions.append('setLockState')
 
+        if hasattr(self, 'retrieve_camera_stream_uri'):
+            actions.append('retrieveCameraStreamUri')
+
         if self.entity_domain == 'light':
             if self.supported_features & LIGHT_SUPPORT_RGB_COLOR:
                 actions.append('setColor')
@@ -455,15 +465,14 @@ class ToggleEntity(Entity):
 class CameraEntity(Entity):
     def retrieve_camera_stream_uri(self):
         camera = self.ha.get('states/' + self.entity_id)
-        access_token = camera['attributes']['access_token']
-        logger.debug('camera access token: %s', access_token)
 
         camera_uri = self.ha.build_url(
-            'camera_proxy_stream/%s?token=%s' % (self.entity_id, access_token))
+            'camera_proxy_stream/{}?api_password={}'.format(self.entity_id, self.ha.config.password))
         logger.debug('camera_uri: %s', camera_uri)
+
         image_uri = self.ha.build_url(
-            'camera_proxy/%s?token=%s' % (self.entity_id, access_token))
-        logger.debug('image_uri:', image_uri)
+            'camera_proxy/{}?api_password={}'.format(self.entity_id, self.ha.config.password))
+        logger.debug('image_uri: %s', image_uri)
 
         return (camera_uri, image_uri)
 
